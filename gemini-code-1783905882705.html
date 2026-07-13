@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실전형 확률·통계 주식 시뮬레이터</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen font-sans p-4">
+
+    <div class="max-w-7xl mx-auto space-y-6">
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <div class="lg:col-span-3 bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg flex flex-col justify-center">
+                <div class="flex justify-between items-end mb-2">
+                    <div>
+                        <h1 class="text-3xl font-bold text-emerald-400 mb-1">📈 실전 확률·통계 모의투자</h1>
+                        <p class="text-gray-400 text-sm">기하 브라운 운동(GBM) 기반 실존 종목 시뮬레이션</p>
+                    </div>
+                    <button id="sim-btn" onclick="toggleSimulation()" class="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded-lg font-bold transition">시뮬레이션 일시정지</button>
+                </div>
+                <div class="flex space-x-8 mt-4 border-t border-gray-700 pt-4">
+                    <div><span class="text-gray-400 block text-sm">총 자산</span><span id="total-assets" class="font-bold text-2xl text-white">10,000,000원</span></div>
+                    <div><span class="text-gray-400 block text-sm">보유 현금</span><span id="cash" class="font-semibold text-xl text-gray-300">10,000,000원</span></div>
+                    <div><span class="text-gray-400 block text-sm">총 수익률</span><span id="total-roi" class="font-bold text-xl text-emerald-400">0.00%</span></div>
+                </div>
+            </div>
+
+            <div class="bg-gray-800 p-4 rounded-xl border border-gray-700 shadow-lg">
+                <h2 class="text-lg font-semibold text-amber-400 mb-3">🏆 실시간 자산 랭킹</h2>
+                <ul id="leaderboard" class="space-y-2 text-sm">
+                </ul>
+            </div>
+        </div>
+
+        <div id="stock-panels" class="grid grid-cols-1 lg:grid-cols-3 gap-6"></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg">
+                <h2 class="text-xl font-semibold text-purple-400 mb-4">📊 종목별 누적 수익률 추이 (%)</h2>
+                <div class="h-64">
+                    <canvas id="returnChart"></canvas>
+                </div>
+                <p class="text-[11px] text-gray-400 mt-2 text-center">* 과거 기록은 1000틱까지 유지됩니다.</p>
+            </div>
+
+            <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold text-indigo-400">🔔 변동률 실제 분포 히스토그램</h2>
+                    <select id="hist-target" onchange="updateHistogram()" class="bg-gray-700 text-white text-xs rounded p-1 border border-gray-600 focus:outline-none">
+                        <option value="0">슬롯 1 종목</option>
+                        <option value="1">슬롯 2 종목</option>
+                        <option value="2">슬롯 3 종목</option>
+                    </select>
+                </div>
+                <div class="h-64 flex-grow">
+                    <canvas id="histogramChart"></canvas>
+                </div>
+                <p class="text-[11px] text-gray-400 mt-2 text-center">* 매 틱마다 발생한 변동률을 수집하여 통계적 정규분포(종 모양)를 증명합니다.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 통계 및 종목 DB ---
+        const STOCKS_DB = {
+            'AAPL': { name: '🍎 애플 (안정형)', startPrice: 230000, drift: 0.0003, vol: 0.012, color: '#ef4444' },
+            '005930': { name: '📱 삼성전자 (박스권)', startPrice: 85000, drift: 0.0001, vol: 0.010, color: '#3b82f6' },
+            'TSLA': { name: '🚗 테슬라 (고위험)', startPrice: 280000, drift: 0.0006, vol: 0.030, color: '#f59e0b' },
+            'NVDA': { name: '💻 엔비디아 (급등락)', startPrice: 180000, drift: 0.0008, vol: 0.035, color: '#10b981' },
+            'KO': { name: '🥤 코카콜라 (초안전)', startPrice: 82000, drift: 0.0001, vol: 0.005, color: '#a855f7' }
+        };
+
+        // --- 내 상태 및 3개의 슬롯 관리 ---
+        let cash = 10000000;
+        let startCash = 10000000;
+        let tickCount = 0;
+        let isRunning = true;
+        let simInterval;
+        let labels = ['시작'];
+
+        // 슬롯 초기화
+        let slots = [
+            initSlot('AAPL', 0),
+            initSlot('005930', 1),
+            initSlot('TSLA', 2)
+        ];
+
+        function initSlot(symbol, index) {
+            let s = STOCKS_DB[symbol];
+            return {
+                index: index,
+                symbol: symbol,
+                name: s.name,
+                currentPrice: s.startPrice,
+                drift: s.drift,
+                vol: s.vol,
+                color: s.color,
+                shares: 0,
+                avgPrice: 0,
+                priceHistory: [s.startPrice],
+                returnHistory: [0],
+                allReturns: [] // **추가됨: 틱별 실제 변동률 누적 배열 (히스토그램용)**
+            };
+        }
+
+        let competitors = [
+            { name: '로보어드바이저 AI', assets: 10000000, drift: 0.0003, vol: 0.008, color: 'text-gray-300' },
+            { name: '야수의 심장(단타)', assets: 10000000, drift: 0.0005, vol: 0.040, color: 'text-gray-300' },
+            { name: '동네 침팬지(랜덤)', assets: 10000000, drift: 0.0000, vol: 0.025, color: 'text-gray-300' }
+        ];
+
+        function randomNormal() {
+            let u = 0, v = 0;
+            while(u === 0) u = Math.random(); 
+            while(v === 0) v = Math.random();
+            return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        }
+
+        // --- Chart.js 설정 ---
+        // 1. 누적 수익률 차트
+        const ctx = document.getElementById('returnChart').getContext('2d');
+        const returnChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: labels, datasets: [] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' } },
+                    y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' } }
+                },
+                plugins: {
+                    legend: { labels: { color: '#e5e7eb' } },
+                    tooltip: { mode: 'index', intersect: false }
+                }
+            }
+        });
+
+        // 2. 히스토그램 차트 설정 (추가됨)
+        const histCtx = document.getElementById('histogramChart').getContext('2d');
+        let binLabels = [];
+        for(let i = -5.0; i <= 5.0; i += 0.5) binLabels.push(i.toFixed(1) + '%'); // -5.0% ~ 5.0% 구간 생성
+
+        const histogramChart = new Chart(histCtx, {
+            type: 'bar',
+            data: {
+                labels: binLabels,
+                datasets: [{
+                    label: '발생 횟수',
+                    data: Array(21).fill(0),
+                    backgroundColor: 'rgba(99, 102, 241, 0.6)', // indigo
+                    borderColor: '#6366f1',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', fontSize: 10 } },
+                    y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', beginAtZero: true } }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        function initChartDatasets() {
+            returnChart.data.datasets = slots.map(slot => ({
+                label: slot.name,
+                data: slot.returnHistory,
+                borderColor: slot.color,
+                borderWidth: 2,
+                pointRadius: 0,
+                fill: false,
+                tension: 0.1
+            }));
+            returnChart.update();
+        }
+
+        // --- UI 생성 ---
+        function renderStockPanels() {
+            const container = document.getElementById('stock-panels');
+            container.innerHTML = '';
+
+            slots.forEach(slot => {
+                let stockOptions = Object.keys(STOCKS_DB).map(key => 
+                    `<option value="${key}" ${key === slot.symbol ? 'selected' : ''}>${STOCKS_DB[key].name}</option>`
+                ).join('');
+
+                let roi = slot.shares > 0 ? ((slot.currentPrice - slot.avgPrice) / slot.avgPrice) * 100 : 0;
+                let roiColor = roi >= 0 ? "text-emerald-400" : "text-rose-400";
+
+                let html = `
+                <div class="bg-gray-800 p-5 rounded-xl border border-gray-700 shadow-lg flex flex-col h-full relative" style="border-top: 4px solid ${slot.color}">
+                    <div class="mb-3">
+                        <select onchange="changeStock(${slot.index}, this.value)" class="bg-gray-700 text-white text-sm rounded p-1 mb-2 w-full border border-gray-600 focus:outline-none">
+                            ${stockOptions}
+                        </select>
+                        <div class="text-2xl font-bold text-gray-100" id="price-${slot.index}">${slot.currentPrice.toLocaleString()}원</div>
+                    </div>
+                    
+                    <div class="bg-gray-750 rounded bg-gray-900 p-3 mb-4 flex-grow">
+                        <div class="flex justify-between text-sm mb-1"><span class="text-gray-400">보유 수량:</span> <span id="shares-${slot.index}" class="text-white">${slot.shares} 주</span></div>
+                        <div class="flex justify-between text-sm mb-1"><span class="text-gray-400">평균 단가:</span> <span id="avg-${slot.index}" class="text-white">${Math.round(slot.avgPrice).toLocaleString()}원</span></div>
+                        <div class="flex justify-between text-sm font-bold"><span class="text-gray-400">수익률:</span> <span id="roi-${slot.index}" class="${roiColor}">${roi.toFixed(2)}%</span></div>
+                    </div>
+
+                    <div class="space-y-2 mt-auto">
+                        <div class="flex space-x-2">
+                            <input type="number" id="amt-${slot.index}" placeholder="수량" class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none text-right" min="1">
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button onclick="buyStock(${slot.index})" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded transition">매수</button>
+                            <button onclick="sellStock(${slot.index})" class="bg-rose-600 hover:bg-rose-500 text-white font-bold py-2 rounded transition">매도</button>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 pt-1 border-t border-gray-700">
+                            <button onclick="fullBuy(${slot.index})" class="bg-emerald-800 hover:bg-emerald-700 text-emerald-200 text-xs font-bold py-2 rounded transition">풀매수(Max)</button>
+                            <button onclick="fullSell(${slot.index})" class="bg-rose-800 hover:bg-rose-700 text-rose-200 text-xs font-bold py-2 rounded transition">풀매도(All)</button>
+                        </div>
+                    </div>
+                </div>
+                `;
+                container.innerHTML += html;
+            });
+        }
+
+        // --- 매매 로직 ---
+        function buyStock(index, amount = null) {
+            let slot = slots[index];
+            if(amount === null) amount = parseInt(document.getElementById(`amt-${index}`).value);
+            
+            if (isNaN(amount) || amount <= 0) return alert("올바른 수량을 입력하세요.");
+            let cost = slot.currentPrice * amount;
+            
+            if (cost > cash) return alert("보유 현금이 부족합니다!");
+            
+            let totalCost = (slot.shares * slot.avgPrice) + cost;
+            slot.shares += amount;
+            slot.avgPrice = totalCost / slot.shares;
+            cash -= cost;
+            
+            document.getElementById(`amt-${index}`).value = "";
+            updateUI();
+        }
+
+        function sellStock(index, amount = null) {
+            let slot = slots[index];
+            if(amount === null) amount = parseInt(document.getElementById(`amt-${index}`).value);
+            
+            if (isNaN(amount) || amount <= 0) return alert("올바른 수량을 입력하세요.");
+            if (amount > slot.shares) return alert("보유 주식보다 많이 매도할 수 없습니다.");
+
+            slot.shares -= amount;
+            cash += slot.currentPrice * amount;
+            if (slot.shares === 0) slot.avgPrice = 0;
+            
+            document.getElementById(`amt-${index}`).value = "";
+            updateUI();
+        }
+
+        function fullBuy(index) {
+            let maxShares = Math.floor(cash / slots[index].currentPrice);
+            if (maxShares > 0) buyStock(index, maxShares);
+        }
+
+        function fullSell(index) {
+            if (slots[index].shares > 0) sellStock(index, slots[index].shares);
+        }
+
+        function changeStock(index, newSymbol) {
+            if (slots[index].shares > 0) {
+                alert("종목을 변경하려면 먼저 보유 중인 해당 슬롯의 주식을 모두 매도해야 합니다.");
+                renderStockPanels();
+                return;
+            }
+            slots[index] = initSlot(newSymbol, index);
+            slots[index].returnHistory = Array(tickCount + 1).fill(0); // 싱크 맞춤
+            
+            // 드롭다운 옵션명 업데이트
+            document.querySelector(`#hist-target option[value="${index}"]`).innerText = `슬롯 ${index+1} (${slots[index].name.split(' ')[1]})`;
+            
+            initChartDatasets();
+            renderStockPanels();
+            updateHistogram();
+        }
+
+        // --- 시뮬레이션 엔진 ---
+        function updateSimulation() {
+            if (!isRunning) return;
+            tickCount++;
+            labels.push(`${tickCount}틱`);
+
+            if (labels.length > 1000) labels.shift();
+
+            slots.forEach(slot => {
+                let z = randomNormal();
+                let pctChange = slot.drift + (slot.vol * z);
+                let nextPrice = Math.round(slot.currentPrice * (1 + pctChange));
+                if (nextPrice < 1000) nextPrice = 1000;
+                
+                slot.currentPrice = nextPrice;
+                slot.priceHistory.push(nextPrice);
+                
+                // **추가됨: 히스토그램을 위해 매 틱마다 변동률(%) 기록**
+                slot.allReturns.push(pctChange); 
+
+                let startP = slot.priceHistory[0];
+                let cumReturn = ((nextPrice - startP) / startP) * 100;
+                slot.returnHistory.push(cumReturn);
+
+                if (slot.priceHistory.length > 1000) {
+                    slot.priceHistory.shift();
+                    slot.returnHistory.shift();
+                }
+            });
+
+            competitors.forEach(comp => {
+                let z = randomNormal();
+                let pctChange = comp.drift + (comp.vol * z);
+                comp.assets = Math.round(comp.assets * (1 + pctChange));
+            });
+
+            returnChart.update();
+            updateHistogram(); // 매 틱마다 히스토그램도 업데이트
+            updateUI();
+        }
+
+        // **추가됨: 히스토그램 업데이트 함수**
+        function updateHistogram() {
+            let targetIndex = parseInt(document.getElementById('hist-target').value);
+            let targetSlot = slots[targetIndex];
+            let bins = Array(21).fill(0);
+            
+            targetSlot.allReturns.forEach(r => {
+                let pct = r * 100; // 백분율로 변환
+                // -5.0% 부터 +5.0% 까지 0.5% 단위로 인덱싱 매핑
+                let binIndex = Math.round((pct + 5.0) / 0.5); 
+                
+                if (binIndex >= 0 && binIndex <= 20) {
+                    bins[binIndex]++;
+                }
+            });
+            
+            // 색상 동기화
+            histogramChart.data.datasets[0].backgroundColor = targetSlot.color + '80'; // 80은 투명도
+            histogramChart.data.datasets[0].borderColor = targetSlot.color;
+            histogramChart.data.datasets[0].data = bins;
+            histogramChart.update('none'); // 깜빡임 방지를 위해 애니메이션 끄기
+        }
+
+        // --- UI 및 리더보드 업데이트 ---
+        function updateUI() {
+            let stockValue = 0;
+            
+            slots.forEach(slot => {
+                stockValue += (slot.shares * slot.currentPrice);
+                document.getElementById(`price-${slot.index}`).innerText = slot.currentPrice.toLocaleString() + "원";
+                document.getElementById(`shares-${slot.index}`).innerText = slot.shares + " 주";
+                document.getElementById(`avg-${slot.index}`).innerText = Math.round(slot.avgPrice).toLocaleString() + "원";
+                
+                let roi = slot.shares > 0 ? ((slot.currentPrice - slot.avgPrice) / slot.avgPrice) * 100 : 0;
+                let roiEl = document.getElementById(`roi-${slot.index}`);
+                roiEl.innerText = roi.toFixed(2) + "%";
+                roiEl.className = roi >= 0 ? "text-emerald-400" : "text-rose-400";
+            });
+
+            let totalAssets = cash + stockValue;
+            let totalRoi = ((totalAssets - startCash) / startCash) * 100;
+
+            document.getElementById('total-assets').innerText = totalAssets.toLocaleString() + "원";
+            document.getElementById('cash').innerText = cash.toLocaleString() + "원";
+            let totalRoiEl = document.getElementById('total-roi');
+            totalRoiEl.innerText = totalRoi.toFixed(2) + "%";
+            totalRoiEl.className = totalRoi >= 0 ? "font-bold text-xl text-emerald-400" : "font-bold text-xl text-rose-400";
+
+            updateLeaderboard(totalAssets);
+        }
+
+        function updateLeaderboard(myAssets) {
+            let players = [...competitors, { name: '나 (Player)', assets: myAssets, color: 'text-emerald-400 font-bold' }];
+            players.sort((a, b) => b.assets - a.assets);
+
+            const board = document.getElementById('leaderboard');
+            board.innerHTML = '';
+            
+            players.forEach((p, index) => {
+                let rankIcon = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔹';
+                board.innerHTML += `
+                    <li class="flex justify-between items-center bg-gray-700 p-2 rounded">
+                        <span class="${p.color || 'text-gray-200'}">${rankIcon} ${p.name}</span>
+                        <span class="${p.color || 'text-gray-200'}">${p.assets.toLocaleString()}원</span>
+                    </li>
+                `;
+            });
+        }
+
+        function toggleSimulation() {
+            isRunning = !isRunning;
+            let btn = document.getElementById('sim-btn');
+            btn.innerText = isRunning ? "시뮬레이션 일시정지" : "시뮬레이션 재개";
+            btn.className = isRunning ? 
+                "bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded-lg font-bold transition" : 
+                "bg-emerald-600 hover:bg-emerald-500 px-6 py-2 rounded-lg font-bold transition";
+        }
+
+        // 드롭다운 초기 텍스트 설정
+        for(let i=0; i<3; i++) {
+            document.querySelector(`#hist-target option[value="${i}"]`).innerText = `슬롯 ${i+1} (${slots[i].name.split(' ')[1]})`;
+        }
+
+        // 초기 실행
+        renderStockPanels();
+        initChartDatasets();
+        updateUI();
+        updateHistogram();
+        simInterval = setInterval(updateSimulation, 1500);
+
+    </script>
+</body>
+</html>
